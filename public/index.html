@@ -585,7 +585,7 @@ const TOWERS=[{lat:26.8917,lng:80.8862},{lat:26.8917,lng:81.0062},{lat:26.8017,l
 const MAX_Q=50;
 
 /* ── State ── */
-let isTracking=false,watchId=null,sendTimer=null,flushTimer=null;
+let isTracking=false,watchId=null,sendTimer=null,flushTimer=null,gpsFallbackTimer=null;
 let curLoc=null,locSource='gps',forcedCell=false,updateCount=0;
 const busMarkers={},busTrails={},busCircles={};
 
@@ -797,6 +797,7 @@ function sendNow(){
 /* ── GPS ── */
 function onGPS(pos){
   if(!isTracking||forcedCell)return;
+  clearTimeout(gpsFallbackTimer);gpsFallbackTimer=null;
   curLoc={lat:pos.coords.latitude,lng:pos.coords.longitude,
           accuracy:pos.coords.accuracy,source:'gps'};
   locSource='gps';
@@ -829,6 +830,8 @@ function startTracking(){
   if('geolocation' in navigator){
     watchId=navigator.geolocation.watchPosition(onGPS,onGPSErr,
       {enableHighAccuracy:true,timeout:10000,maximumAge:1000});
+    // Auto-fallback to cell tower if GPS doesn't respond in 5 seconds
+    gpsFallbackTimer=setTimeout(()=>{if(!curLoc&&isTracking)goCell('GPS timed out — switching to cell tower fallback');},5000);
   } else { goCell('Geolocation unsupported.'); }
   if(sendTimer)clearInterval(sendTimer);
   sendTimer=setInterval(()=>{if(locSource==='cell')curLoc=cellLoc();sendNow();},3000);
@@ -839,6 +842,7 @@ function stopTracking(){
   if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}
   if(sendTimer){clearInterval(sendTimer);sendTimer=null;}
   if(flushTimer){clearInterval(flushTimer);flushTimer=null;}
+  if(gpsFallbackTimer){clearTimeout(gpsFallbackTimer);gpsFallbackTimer=null;}
   isTracking=false;forcedCell=false;curLoc=null;
   document.getElementById('startBtn').disabled=false;
   document.getElementById('stopBtn').disabled=true;
