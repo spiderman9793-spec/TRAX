@@ -1,0 +1,289 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Bus Tracker · Crowdsource Real-Time</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0f172a; color: #f8fafc; }
+        .container { max-width: 1100px; margin: 0 auto; padding: 18px; }
+        .card { background: rgba(15, 23, 42, 0.95); border: 1px solid rgba(148, 163, 184, 0.15); border-radius: 20px; padding: 18px; box-shadow: 0 18px 50px rgba(15, 23, 42, 0.35); }
+        h1 { margin: 0 0 18px; font-size: clamp(1.8rem, 3vw, 2.6rem); text-align: center; color: #38bdf8; }
+        .controls { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-bottom: 14px; }
+        input, button { border: none; border-radius: 14px; font-size: 1rem; }
+        input { min-width: 170px; padding: 12px 14px; background: #1e293b; color: #e2e8f0; text-align: center; }
+        button { padding: 12px 18px; cursor: pointer; font-weight: 700; color: #fff; transition: transform 0.15s ease, background 0.15s ease; }
+        button:hover { transform: translateY(-1px); }
+        .primary { background: #0284c7; }
+        .primary:hover { background: #0369a1; }
+        .stop-btn { background: #ef4444; }
+        .stop-btn:hover { background: #dc2626; }
+        .status { background: #0f172a; padding: 14px 16px; border-radius: 16px; font-family: 'Segoe UI Mono', monospace; text-align: center; margin-bottom: 16px; border: 1px solid rgba(148, 163, 184, 0.18); }
+        #map { width: 100%; min-height: 55vh; height: 600px; border-radius: 18px; border: 2px solid #38bdf8; }
+        .legend { margin-top: 12px; text-align: center; color: #cbd5e1; font-size: 0.95rem; }
+        footer { margin-top: 18px; text-align: center; font-size: 0.87rem; color: #94a3b8; }
+        @media (max-width: 640px) {
+            .controls { flex-direction: column; align-items: stretch; }
+            input { width: 100%; }
+            #map { height: 52vh; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="card">
+        <h1>🚍 Crowdsource Bus Tracker</h1>
+        <div class="controls">
+            <input id="busId" type="text" placeholder="Enter bus number" value="TEST-BUS-01" autocomplete="off" />
+            <button id="startBtn" class="primary">📍 Start Tracking</button>
+            <button id="stopBtn" class="stop-btn">⏹️ Stop Tracking</button>
+        </div>
+        <div id="statusMsg" class="status">⚡ Enter bus number and tap Start. GPS updates every 3 seconds.</div>
+        <div id="map"></div>
+<div class="legend">Live map updates via Socket.io. Last 10 locations stored in browser localStorage. If GPS fails, cell-tower triangulation is mocked first (replace with OpenCellID API later).</div>
+        <footer>Mobile-responsive, browser-based tracker with no database required for MVP.</footer>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js" crossorigin="anonymous"></script>
+<script>
+    const socket = io();
+    const map = L.map('map').setView([26.8467, 80.9462], 13);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 19,
+    }).addTo(map);
+
+    let watchId = null;
+    let currentLocation = null;
+    let isTracking = false;
+    let sendTimer = null;
+    let busMarkers = {};
+
+    function updateStatus(text, isError = false) {
+        const status = document.getElementById('statusMsg');
+        status.textContent = text;
+        status.style.color = isError ? '#f8d7da' : '#e2e8f0';
+        status.style.background = isError ? 'rgba(220, 38, 38, 0.12)' : 'rgba(15, 23, 42, 0.9)';
+    }
+
+    function saveHistory(point) {
+        const history = JSON.parse(localStorage.getItem('bus_locations') || '[]');
+        history.push(point);
+        while (history.length > 10) history.shift();
+        localStorage.setItem('bus_locations', JSON.stringify(history));
+    }
+
+    function renderMarker(entry, focus = false) {
+        const { busId, lat, lng, source, accuracy, timestamp } = entry;
+        if (!busId || typeof lat !== 'number' || typeof lng !== 'number') return;
+
+        const popupText = `🚌 ${busId}\n📍 ${lat.toFixed(5)}, ${lng.toFixed(5)}\n📡 ${source}${accuracy ? ` | ±${Math.round(accuracy)}m` : ''}\n⏱ ${new Date(timestamp).toLocaleTimeString()}`;
+
+        if (!busMarkers[busId]) {
+            busMarkers[busId] = L.marker([lat, lng]).addTo(map).bindPopup(popupText);
+        } else {
+            busMarkers[busId].setLatLng([lat, lng]).setPopupContent(popupText);
+        }
+
+        if (focus) {
+            busMarkers[busId].openPopup();
+            map.setView([lat, lng], 15);
+        }
+    }
+
+    async function sendLocation(payload) {
+        try {
+            await fetch('/api/location', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+        } catch (error) {
+            console.warn('Unable to send location to server', error);
+            updateStatus('⚠️ Could not reach server. Showing local map only.', true);
+        }
+    }
+
+function getBusId() {
+        const el = document.getElementById('busId');
+        const value = (el?.value || '').trim();
+        return value || null;
+    }
+
+    function getEffectiveBusId() {
+        return getBusId() || localStorage.getItem('tracking_bus') || 'UNKNOWN-BUS';
+    }
+
+
+    function sendCurrentLocation() {
+        if (!currentLocation || !isTracking) return;
+    const payload = {
+            busId: getEffectiveBusId(),
+            lat: currentLocation.lat,
+            lng: currentLocation.lng,
+            accuracy: currentLocation.accuracy || null,
+            source: currentLocation.source || 'gps',
+            timestamp: new Date().toISOString(),
+        };
+        saveHistory(payload);
+        renderMarker(payload, true);
+        sendLocation(payload);
+    }
+
+    async function mockCellTowerFallback() {
+        const baseLat = currentLocation?.lat || 26.8467;
+        const baseLng = currentLocation?.lng || 80.9462;
+        const noise = 0.006;
+        return new Promise(resolve => setTimeout(() => resolve({
+            lat: baseLat + (Math.random() - 0.5) * noise,
+            lng: baseLng + (Math.random() - 0.5) * noise,
+            accuracy: 1400,
+            source: 'cell-tower-fallback',
+        }), 400));
+    }
+
+    async function getCellTowerFallback() {
+        if (!isTracking) return;
+        updateStatus('⚠️ GPS unavailable. Using mock cell-tower fallback...', true);
+        currentLocation = await mockCellTowerFallback();
+        sendCurrentLocation();
+    }
+
+    function onLocationSuccess(position) {
+        if (!isTracking) return;
+        currentLocation = {
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+            accuracy: position.coords.accuracy,
+            source: 'gps',
+        };
+        updateStatus(`✅ Tracking ${getBusId()} | ${new Date().toLocaleTimeString()} | Accuracy ${Math.round(currentLocation.accuracy)}m`);
+        renderMarker({ busId: getEffectiveBusId(), ...currentLocation, timestamp: new Date().toISOString() }, true);
+    }
+
+    function onLocationError(error) {
+        console.warn('Geolocation error', error);
+        updateStatus(`❌ GPS error: ${error.message || 'Location unavailable'}. Falling back to cell tower.`, true);
+        getCellTowerFallback();
+    }
+
+    function startTracking() {
+        const busId = (getBusId() || '').trim();
+        if (!busId) {
+            updateStatus('❌ Please enter a bus number.', true);
+            return;
+        }
+        if (isTracking) {
+            updateStatus('⚠️ Tracking already active.', true);
+            return;
+        }
+
+
+        isTracking = true;
+        updateStatus(`🟢 Started tracking ${busId}. Waiting for GPS...`);
+        localStorage.setItem('tracking_bus', busId);
+        localStorage.setItem('tracking_active', 'true');
+        // Persist busId input so it survives refresh.
+        localStorage.setItem('tracking_bus_input', busId);
+        localStorage.setItem('last_valid_bus_id', busId);
+
+
+
+        if ('geolocation' in navigator) {
+            watchId = navigator.geolocation.watchPosition(onLocationSuccess, onLocationError, {
+                enableHighAccuracy: true,
+                timeout: 10000,
+                maximumAge: 1000,
+            });
+        } else {
+            updateStatus('⚠️ Geolocation unsupported. Using fallback only.', true);
+            getCellTowerFallback();
+        }
+
+        if (sendTimer) clearInterval(sendTimer);
+        sendTimer = setInterval(() => {
+            if (currentLocation) {
+                sendCurrentLocation();
+            } else {
+                getCellTowerFallback();
+            }
+        }, 3000);
+    }
+
+    function stopTracking() {
+        if (watchId !== null) {
+            navigator.geolocation.clearWatch(watchId);
+            watchId = null;
+        }
+        if (sendTimer) {
+            clearInterval(sendTimer);
+            sendTimer = null;
+        }
+        isTracking = false;
+        localStorage.removeItem('tracking_active');
+        updateStatus('⏹️ Tracking stopped. Last known location remains on the map.');
+    }
+
+    function loadLastLocation() {
+        // Restore bus input if present.
+        const savedBus = localStorage.getItem('tracking_bus_input');
+        if (savedBus) document.getElementById('busId').value = savedBus;
+        const lastValid = localStorage.getItem('last_valid_bus_id');
+        if (!savedBus && lastValid) {
+            document.getElementById('busId').value = lastValid;
+        }
+
+
+        const history = JSON.parse(localStorage.getItem('bus_locations') || '[]');
+        if (history.length > 0) {
+            const latest = history[history.length - 1];
+            const currentBusId = getEffectiveBusId();
+            renderMarker({ busId: currentBusId, ...latest, timestamp: latest.timestamp || new Date().toISOString() }, true);
+            updateStatus('📌 Loaded cached location from previous session. Tap Start to resume.', false);
+
+        }
+        if (localStorage.getItem('tracking_active') === 'true') {
+            updateStatus('🔁 Previous tracking session was active. Tap Start to resume.', false);
+        }
+    }
+
+
+    socket.on('connect', () => {
+        updateStatus('🔌 Connected to server. Enter bus number and Start tracking.');
+    });
+
+    socket.on('disconnect', () => {
+        updateStatus('⚠️ Lost server connection. Local tracking continues.', true);
+    });
+
+    socket.on('initialState', (state) => {
+        Object.values(state).forEach((bus) => {
+            if (bus && bus.latest) {
+                renderMarker(bus.latest, false);
+            }
+        });
+    });
+
+    socket.on('locationUpdate', (bus) => {
+        if (bus && bus.latest) {
+            renderMarker(bus.latest, bus.latest.busId === getBusId());
+        }
+    });
+
+    document.getElementById('startBtn').addEventListener('click', startTracking);
+    document.getElementById('stopBtn').addEventListener('click', stopTracking);
+    document.getElementById('busId').addEventListener('change', () => {
+        localStorage.setItem('tracking_bus', getBusId());
+        if (isTracking) {
+            updateStatus(`🔄 Bus changed to ${getBusId()} while tracking.`, false);
+        }
+    });
+
+    loadLastLocation();
+</script>
+</body>
+</html>
