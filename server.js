@@ -20,7 +20,18 @@ const ttlTimers = new Map();
 const TTL_DURATION = 30000; // 30 seconds
 
 // Middleware
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com", "https://cdn.socket.io"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "https://*.tile.openstreetmap.org", "https://*.basemaps.cartocdn.com"],
+      connectSrc: ["'self'", "wss:", "https://unpkg.com"],
+    }
+  }
+}));
 app.use(compression());
 app.use(morgan('combined'));
 app.use(cors({ origin: CORS_ORIGIN }));
